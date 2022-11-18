@@ -8,6 +8,6 @@ typechain
 cache
 artifacts
 
-./scripts/scraps
-./tests/scraps
+scripts/scraps
+tests/scraps
 
