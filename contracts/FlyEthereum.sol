@@ -9,9 +9,11 @@ import "@openzeppelin/contracts/token/ERC20/extensions/draft-ERC20Permit.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.sol";
 
 interface IAlchemistV2Eth is IERC20{
-  function deposit(address _yieldToken, uint256 _amount, address _receipient) external returns (uint256 shares);
+//   function deposit(address _yieldToken, uint256 _amount, address _receipient) external returns (uint256 shares);
   function depositUnderlying(address _yieldToken, uint256 _amount, address _receipient, uint256 _minimumAmountOut) external returns (uint256 shares);
 }
+
+// interface IWETH9 is IERC20{}
 
 contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Permit {
     bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
@@ -70,8 +72,9 @@ contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Pe
     // }
 
     function _approveAlchemistV2(uint256 assets) internal {
-        IAlchemistV2Eth alchemist = IAlchemistV2Eth(ALCHEMIST_CONTRACT);
-        alchemist.approve(ALCHEMIST_CONTRACT, assets);
+        IERC20 weth9 = IERC20(0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2);
+        // IERC20 weth9 = IERC20(super.asset());
+        weth9.approve(ALCHEMIST_CONTRACT, assets);
     }
 
     function _depositAlchemist(uint256 assets, address receiver) internal returns (uint256) {
@@ -81,9 +84,11 @@ contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Pe
         _approveAlchemistV2(assets);
 
         IAlchemistV2Eth alchemist = IAlchemistV2Eth(ALCHEMIST_CONTRACT);
-        uint256 dept = alchemist.depositUnderlying(ALCHEMIST_YIELD_TOKEN_CONTRACT, assets, address(this), assets);
+        uint256 minimumRequested = (assets / 100) * 98;
+        uint256 dept = alchemist.depositUnderlying(ALCHEMIST_YIELD_TOKEN_CONTRACT, assets, address(this), minimumRequested);
         totalDebt += dept;
         return dept;
+        // return 10;
     }
 
     function deposit(uint256 assets, address receiver) public override returns (uint256) {
