@@ -2,16 +2,30 @@
 pragma solidity ^0.8.9;
 
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import "@openzeppelin/contracts/interfaces/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Burnable.sol";
 import "@openzeppelin/contracts/security/Pausable.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/draft-ERC20Permit.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.sol";
 
-interface IAlchemistV2Eth is IERC20{
-//   function deposit(address _yieldToken, uint256 _amount, address _receipient) external returns (uint256 shares);
+interface IAlchemistV2Eth {
+  function approveMint(address spender, uint256 amount) external;
+  function mint(uint256 amount, address receiver) external;
   function depositUnderlying(address _yieldToken, uint256 _amount, address _receipient, uint256 _minimumAmountOut) external returns (uint256 shares);
 }
+
+// interface ICurveFactoryV2 {
+//   function approveMint(address spender, uint256 amount) external;
+//   function mint(uint256 amount, address receiver) external;
+//   function depositUnderlying(address _yieldToken, uint256 _amount, address _receipient, uint256 _minimumAmountOut) external returns (uint256 shares);
+// }
+
+interface ICurvePoolAlEth {
+  function coins(uint256 index) external view returns (address);
+  function get_dy(uint256 indexCoinToSend, uint256 indexCoinToReceive, uint256 amount) external view returns (uint256);
+  function exchange(uint256 indexCoinToSend, uint256 indexCoinToReceive, uint256 assets, uint256 minDy) external returns (uint256);
+} 
 
 // interface IWETH9 is IERC20{}
 
@@ -21,12 +35,12 @@ contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Pe
     bytes32 public constant MANAGER_ROLE = keccak256("MANAGER_ROLE");
     // alchemist contract
     address public constant ALCHEMIST_CONTRACT = 0x062Bf725dC4cDF947aa79Ca2aaCCD4F385b13b5c;
-    // yield token - WETH yVault (yvWETH)
     address public constant ALCHEMIST_YIELD_TOKEN_CONTRACT = 0xa258C4606Ca8206D8aA700cE2143D7db854D168c;
     address public constant ALCHEMIST_DEBT_TOKEN_CONTRACT= 0x0100546F2cD4C9D97f798fFC9755E47865FF7Ee6;
+    address public constant CURVE_ALETH_POOL_CONTRACT = 0xC4C319E2D4d66CcA4464C0c2B32c9Bd23ebe784e;
     uint256 public constant ALCHEMIST_MIN_DY_YIELD_TOKEN = 98;
 
-    IERC20 internal weth9 = IERC20(0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2);
+    IERC20 internal weth9;
     // IERC20 weth9 = IERC20(super.asset());
 
 
@@ -55,6 +69,7 @@ contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Pe
         _grantRole(MINTER_ROLE, msg.sender);
         _grantRole(MANAGER_ROLE, msg.sender);
         foldingThreshold = 1000000000000000000;
+        weth9 = IERC20(asset());
     }
 
     // function _getCurrentAlchemixDept() internal view returns (uint256) {
@@ -69,23 +84,63 @@ contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Pe
         return 10000000000000000000;
     }
 
-    // function fold (uint256 assets, address receiver) internal view returns (uint256) {
-    //     require(assets >= foldingThreshold, "A minimum deposit of 2 Eth is required");
-    //     require(assets <= maxDeposit(receiver), "A maximum deposit is 10 Eth");
-        
-    // }
+    // not gas safe
+    function _fold () internal {
+        while (totalAssets() >= foldingThreshold) {
+            _approveAlchemistV2(totalAssets());
+            uint256 alcxShares = _depositAlchemist(totalAssets());
+            uint256 maxLoan = _calculateMaxLoan(alcxShares);
+            _takeAlEthLoan(maxLoan);
+            // _swapAlEth(maxLoan);
+            // _wrapEth(dy);
+        }
+    }
 
     function _approveAlchemistV2(uint256 assets) internal {
         weth9.approve(ALCHEMIST_CONTRACT, assets);
     }
 
-    function _depositAlchemist(uint256 assets) internal {
-
-        _approveAlchemistV2(assets);
-
+    function _depositAlchemist(uint256 assets) internal returns (uint256) {
         IAlchemistV2Eth alchemist = IAlchemistV2Eth(ALCHEMIST_CONTRACT);
         uint256 minimumRequested = (assets / 100) * ALCHEMIST_MIN_DY_YIELD_TOKEN;
-        alchemist.depositUnderlying(ALCHEMIST_YIELD_TOKEN_CONTRACT, assets, address(this), minimumRequested);
+        uint256 alcxShares = alchemist.depositUnderlying(ALCHEMIST_YIELD_TOKEN_CONTRACT, assets, address(this), minimumRequested);
+        return alcxShares;
+    }
+
+    function _calculateMaxLoan(uint256 alchemixShares) internal pure returns (uint256) {
+        return (alchemixShares / 2) -1;
+    }
+
+    function _takeAlEthLoan(uint256 amount) internal {
+        IAlchemistV2Eth alchemist = IAlchemistV2Eth(ALCHEMIST_CONTRACT);
+        alchemist.approveMint(address(alchemist), amount);
+        alchemist.mint(amount, address(this));
+    }
+
+    function _swapAlEth(uint256 assets) internal {
+        ICurvePoolAlEth curvePool = ICurvePoolAlEth(CURVE_ALETH_POOL_CONTRACT);
+        address zeroAddress = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE;
+        uint256 indexEth;
+        uint256 indexAlEth;
+        uint256 minDy = ((assets / 100) * 96);
+
+        if (curvePool.coins(0) == zeroAddress) {
+            indexEth = 0;
+            indexAlEth = 1;
+        } else {
+            indexEth = 1;
+            indexAlEth = 0;
+        }
+        require(curvePool.get_dy(indexAlEth, indexEth, assets) <= minDy, "curve pool dy too low");
+
+        IERC20 alEth = IERC20(ALCHEMIST_DEBT_TOKEN_CONTRACT);
+
+        alEth.approve(CURVE_ALETH_POOL_CONTRACT, assets);
+
+        curvePool.exchange(indexAlEth, indexEth, assets, minDy);
+    }
+
+    function _wrapEth(uint256 assets) internal {
     }
 
     function deposit(uint256 assets, address receiver) public override returns (uint256) {
@@ -93,9 +148,7 @@ contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Pe
 
         uint256 shares = super.deposit(assets, receiver);
 
-        if (weth9.balanceOf(address(this)) >= foldingThreshold) {
-            _depositAlchemist(totalAssets());
-        }
+        _fold();
 
         return shares;
     }

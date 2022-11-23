@@ -37,7 +37,7 @@ const wrapEth = async (contract: Contract, amount: BigNumber, spender: SignerWit
   await contract.connect(spender).deposit({value: amount});
 }
 
-const getAllEth = async (contract: Contract, amount: BigNumber, receiver: string) => {
+const getAlEth = async (contract: Contract, amount: BigNumber, receiver: string) => {
   //impersonate whitelist owner
   await hre.network.provider.request({
     method: "hardhat_impersonateAccount",
@@ -254,7 +254,7 @@ xdescribe("Curve protocol integration", function () {
       const min_dy = (amount.div(ethers.BigNumber.from('100'))).mul(ethers.BigNumber.from('96'));
 
       // get some alEth
-      await getAllEth(alETH, amount, accounts[0].address);
+      await getAlEth(alETH, amount, accounts[0].address);
       expect(await alETH.balanceOf(accounts[0].address)).to.be.gte(amount);
       console.log('account has alEth balance');
 
@@ -584,6 +584,7 @@ describe("FlyEth integration", function () {
       const yieldToken = await flyEthContract.ALCHEMIST_YIELD_TOKEN_CONTRACT();
       const min_dy = (amount.div(ethers.BigNumber.from('100'))).mul(ethers.BigNumber.from((await flyEthContract.ALCHEMIST_MIN_DY_YIELD_TOKEN()).toString()));
       const positions = await AlchemistV2.positions(flyEthContract.address, yieldToken);
+      const maxMintAmount = positions.shares.div(ethers.BigNumber.from('2')).sub(ethers.BigNumber.from('1'));
       
       // account 0 has spent it's weth
       expect(await weth9Contract.balanceOf(accounts[0].address)).to.eq(ZERO);
@@ -595,8 +596,8 @@ describe("FlyEth integration", function () {
       expect(await weth9Contract.allowance(flyEthContract.address, AlchemistV2.address)).to.eq(ZERO);
       // flyEth has spent it's Weth
       expect(await weth9Contract.balanceOf(flyEthContract.address)).to.eq(ZERO);
-      // flyEth has no debt on Alhemix
-      expect((await AlchemistV2.accounts(flyEthContract.address)).debt).to.eq(ZERO);
+      // flyEth has `maxMintAmount` debt on Alhemix
+      expect((await AlchemistV2.accounts(flyEthContract.address)).debt).to.eq(maxMintAmount);
       // flyEth has deposited yieldToken in alchemix
       expect((await AlchemistV2.accounts(flyEthContract.address)).depositedTokens[0]).to.eq(yieldToken);    
       // flyEth's shares on alchemix is at least min_dy
