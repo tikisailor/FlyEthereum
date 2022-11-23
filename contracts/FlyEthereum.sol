@@ -24,9 +24,13 @@ contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Pe
     // yield token - WETH yVault (yvWETH)
     address public constant ALCHEMIST_YIELD_TOKEN_CONTRACT = 0xa258C4606Ca8206D8aA700cE2143D7db854D168c;
     address public constant ALCHEMIST_DEBT_TOKEN_CONTRACT= 0x0100546F2cD4C9D97f798fFC9755E47865FF7Ee6;
+    uint256 public constant ALCHEMIST_MIN_DY_YIELD_TOKEN = 98;
+
+    IERC20 internal weth9 = IERC20(0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2);
+    // IERC20 weth9 = IERC20(super.asset());
 
 
-    uint256 public foldingThreshold;
+    uint256 public foldingThreshold = 5000000000000000000;
 
     // positive value reflecting total debt held by the protocol
     uint256 public totalDebt;
@@ -72,29 +76,26 @@ contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Pe
     // }
 
     function _approveAlchemistV2(uint256 assets) internal {
-        IERC20 weth9 = IERC20(0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2);
-        // IERC20 weth9 = IERC20(super.asset());
         weth9.approve(ALCHEMIST_CONTRACT, assets);
     }
 
-    function _depositAlchemist(uint256 assets, address receiver) internal returns (uint256) {
-        require(assets >= foldingThreshold, "Minimum deposit is 2 WETH");
-        require(assets <= maxDeposit(receiver), "Maximum deposit is 10 WETH");
+    function _depositAlchemist(uint256 assets) internal {
 
         _approveAlchemistV2(assets);
 
         IAlchemistV2Eth alchemist = IAlchemistV2Eth(ALCHEMIST_CONTRACT);
-        uint256 minimumRequested = (assets / 100) * 98;
-        uint256 dept = alchemist.depositUnderlying(ALCHEMIST_YIELD_TOKEN_CONTRACT, assets, address(this), minimumRequested);
-        totalDebt += dept;
-        return dept;
-        // return 10;
+        uint256 minimumRequested = (assets / 100) * ALCHEMIST_MIN_DY_YIELD_TOKEN;
+        alchemist.depositUnderlying(ALCHEMIST_YIELD_TOKEN_CONTRACT, assets, address(this), minimumRequested);
     }
 
     function deposit(uint256 assets, address receiver) public override returns (uint256) {
+        require(assets <= maxDeposit(receiver), "Maximum deposit is 10 WETH");
+
         uint256 shares = super.deposit(assets, receiver);
 
-        _depositAlchemist(assets, receiver);
+        if (weth9.balanceOf(address(this)) >= foldingThreshold) {
+            _depositAlchemist(totalAssets());
+        }
 
         return shares;
     }
