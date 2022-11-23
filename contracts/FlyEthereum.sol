@@ -30,7 +30,7 @@ contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Pe
     // IERC20 weth9 = IERC20(super.asset());
 
 
-    uint256 public foldingThreshold = 5000000000000000000;
+    uint256 public foldingThreshold;
 
     // positive value reflecting total debt held by the protocol
     uint256 public totalDebt;
@@ -54,7 +54,7 @@ contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Pe
         _grantRole(PAUSER_ROLE, msg.sender);
         _grantRole(MINTER_ROLE, msg.sender);
         _grantRole(MANAGER_ROLE, msg.sender);
-        foldingThreshold = 2000000000000000000;
+        foldingThreshold = 1000000000000000000;
     }
 
     // function _getCurrentAlchemixDept() internal view returns (uint256) {
