@@ -576,6 +576,10 @@ describe("FlyEth integration", function () {
 
     it("deposits underlying (Weth) into flyEthContract", async function () {
       const amount = hre.ethers.utils.parseEther('10.0');
+      // await accounts[0].sendTransaction({
+      //   to: flyEthContract.address,
+      //   value: ethers.utils.parseEther("10.0"),
+      // });
       await wrapEth(weth9Contract, amount, accounts[0]);
       await weth9Contract.connect(accounts[0]).approve(flyEthContract.address, amount);
       await flyEthContract.connect(accounts[0]).deposit(amount, accounts[0].address);

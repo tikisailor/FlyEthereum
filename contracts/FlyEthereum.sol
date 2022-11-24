@@ -23,8 +23,8 @@ interface IAlchemistV2Eth {
 
 interface ICurvePoolAlEth {
   function coins(uint256 index) external view returns (address);
-  function get_dy(uint256 indexCoinToSend, uint256 indexCoinToReceive, uint256 amount) external view returns (uint256);
-  function exchange(uint256 indexCoinToSend, uint256 indexCoinToReceive, uint256 assets, uint256 minDy) external returns (uint256);
+  function get_dy(int128 indexCoinToSend, int128 indexCoinToReceive, uint256 amount) external view returns (uint256);
+  function exchange(int128 indexCoinToSend, int128 indexCoinToReceive, uint256 assets, uint256 minDy) external payable returns (uint256);
 } 
 
 // interface IWETH9 is IERC20{}
@@ -91,7 +91,7 @@ contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Pe
             uint256 alcxShares = _depositAlchemist(totalAssets());
             uint256 maxLoan = _calculateMaxLoan(alcxShares);
             _takeAlEthLoan(maxLoan);
-            // _swapAlEth(maxLoan);
+            _swapAlEth(maxLoan);
             // _wrapEth(dy);
         }
     }
@@ -120,8 +120,8 @@ contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Pe
     function _swapAlEth(uint256 assets) internal {
         ICurvePoolAlEth curvePool = ICurvePoolAlEth(CURVE_ALETH_POOL_CONTRACT);
         address zeroAddress = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE;
-        uint256 indexEth;
-        uint256 indexAlEth;
+        int128 indexEth;
+        int128 indexAlEth;
         uint256 minDy = ((assets / 100) * 96);
 
         if (curvePool.coins(0) == zeroAddress) {
@@ -131,13 +131,18 @@ contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Pe
             indexEth = 1;
             indexAlEth = 0;
         }
-        require(curvePool.get_dy(indexAlEth, indexEth, assets) <= minDy, "curve pool dy too low");
+
+        uint256 dy = curvePool.get_dy(indexAlEth, indexEth, assets);
+
+        require(dy >= minDy, "curve pool dy too low");
 
         IERC20 alEth = IERC20(ALCHEMIST_DEBT_TOKEN_CONTRACT);
 
         alEth.approve(CURVE_ALETH_POOL_CONTRACT, assets);
 
-        curvePool.exchange(indexAlEth, indexEth, assets, minDy);
+        dy = curvePool.exchange(indexAlEth, indexEth, assets, minDy);
+
+        //wrap(dy)
     }
 
     function _wrapEth(uint256 assets) internal {
@@ -179,5 +184,9 @@ contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Pe
         override
     {
         super._beforeTokenTransfer(from, to, amount);
+    }
+
+    receive() external payable {
+        // do nothing
     }
 }
