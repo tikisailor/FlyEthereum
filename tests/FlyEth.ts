@@ -34,7 +34,8 @@ const ZERO = ethers.BigNumber.from('0');
 // const largeWETHaccount = '0x2feb1512183545f48f6b9c5b4ebfcaf49cfca6f3'
 
 const wrapEth = async (contract: Contract, amount: BigNumber, spender: SignerWithAddress) => {
-  await contract.connect(spender).deposit({value: amount});
+  const tx = await contract.connect(spender).deposit({value: amount});
+  return tx;
 }
 
 const getAlEth = async (contract: Contract, amount: BigNumber, receiver: string) => {
@@ -313,7 +314,6 @@ xdescribe("AlchemistV2 integration", function () {
   let weth9Contract: Contract;
   let flyEthContract: FlyEthereum;
   let alEth: Contract;
-  let yvWETH: Contract;
   let accounts: any[];
   let provider: any;
 
@@ -341,7 +341,7 @@ xdescribe("AlchemistV2 integration", function () {
 
     alEth = new ethers.Contract(await flyEthContract.ALCHEMIST_DEBT_TOKEN_CONTRACT(), alEthAbi, accounts[0]) as ERC20;
 
-    yvWETH = new ethers.Contract(await flyEthContract.ALCHEMIST_YIELD_TOKEN_CONTRACT(), yvWethAbi, accounts[0]) as ERC20;
+    // yvWETH = new ethers.Contract(await flyEthContract.ALCHEMIST_YIELD_TOKEN_CONTRACT(), yvWethAbi, accounts[0]) as ERC20;
   });
 
   describe("verifying initail state", function () {
@@ -520,6 +520,7 @@ describe("FlyEth integration", function () {
       it("verifies eth balances", async function () {
         expect(await provider.getBalance(accounts[0].address)).to.eq(hre.ethers.utils.parseEther('10000.0'));
         expect(await provider.getBalance(accounts[1].address)).to.eq(hre.ethers.utils.parseEther('10000.0'));
+        expect(await provider.getBalance(flyEthContract.address)).to.eq(ZERO);
       });
 
       it("verifies weth balances", async function () {
@@ -580,16 +581,27 @@ describe("FlyEth integration", function () {
       //   to: flyEthContract.address,
       //   value: ethers.utils.parseEther("10.0"),
       // });
-      await wrapEth(weth9Contract, amount, accounts[0]);
-      await weth9Contract.connect(accounts[0]).approve(flyEthContract.address, amount);
-      await flyEthContract.connect(accounts[0]).deposit(amount, accounts[0].address);
+      const tx1 = await (await wrapEth(weth9Contract, amount, accounts[0])).wait();
+      const tx2 = await (await weth9Contract.connect(accounts[0]).approve(flyEthContract.address, amount)).wait();
+      const tx3 = await (await flyEthContract.connect(accounts[0]).deposit(amount, accounts[0].address)).wait();
       await provider.send("evm_mine", []);
 
       const yieldToken = await flyEthContract.ALCHEMIST_YIELD_TOKEN_CONTRACT();
-      const min_dy = (amount.div(ethers.BigNumber.from('100'))).mul(ethers.BigNumber.from((await flyEthContract.ALCHEMIST_MIN_DY_YIELD_TOKEN()).toString()));
+      const min_dy_underlying = (amount.div(ethers.BigNumber.from('100'))).mul(ethers.BigNumber.from((await flyEthContract.ALCHEMIST_MIN_DY_YIELD_TOKEN()).toString()));
       const positions = await AlchemistV2.positions(flyEthContract.address, yieldToken);
+
       const maxMintAmount = positions.shares.div(ethers.BigNumber.from('2')).sub(ethers.BigNumber.from('1'));
-      
+      const min_dy_curve = (maxMintAmount.div(ethers.BigNumber.from('100'))).mul(ethers.BigNumber.from('96'));
+
+      // const totalTxCost = ((tx1.cumulativeGasUsed).mul(tx1.effectiveGasPrice)).add((tx2.cumulativeGasUsed).mul(tx2.effectiveGasPrice)).add((tx3.cumulativeGasUsed).mul(tx3.effectiveGasPrice))
+      // console.log(totalTxCost);
+
+      // const curveAlEthPool = new ethers.Contract(alEthPoolAddress, curveAlEthPoolAbi,flyEthContract.signer)
+      // const curveDy = await curveAlEthPool.get_dy(1, 0, maxMintAmount);
+
+      console.log(`shares ${positions.shares}`);
+      console.log(`debt ${(await AlchemistV2.accounts(flyEthContract.address)).debt}`)
+
       // account 0 has spent it's weth
       expect(await weth9Contract.balanceOf(accounts[0].address)).to.eq(ZERO);
       // account 0 has `amount` shares in flyEth
@@ -599,13 +611,16 @@ describe("FlyEth integration", function () {
       // AlchemistV2 has used up it's Weth allowance from flyEth
       expect(await weth9Contract.allowance(flyEthContract.address, AlchemistV2.address)).to.eq(ZERO);
       // flyEth has spent it's Weth
-      expect(await weth9Contract.balanceOf(flyEthContract.address)).to.eq(ZERO);
+      expect(await weth9Contract.balanceOf(flyEthContract.address)).to.be.lt(await flyEthContract.foldingThreshold());
       // flyEth has `maxMintAmount` debt on Alhemix
-      expect((await AlchemistV2.accounts(flyEthContract.address)).debt).to.eq(maxMintAmount);
+      // expect((await AlchemistV2.accounts(flyEthContract.address)).debt).to.eq(maxMintAmount);
       // flyEth has deposited yieldToken in alchemix
       expect((await AlchemistV2.accounts(flyEthContract.address)).depositedTokens[0]).to.eq(yieldToken);    
       // flyEth's shares on alchemix is at least min_dy
-      expect(positions.shares).to.be.gte(min_dy);
+      expect(positions.shares).to.be.gte(min_dy_underlying);
+      // flyEth has ether
+      // expect(await provider.getBalance(flyEthContract.address)).to.be.gte(min_dy_curve);
+      // expect(await provider.getBalance(flyEthContract.address)).to.eq(curveDy);
     });
     // it("deposits `amount` WETH from flyEth into AlchemistV2", async function () {
     //   const amount = hre.ethers.utils.parseEther('5.0');

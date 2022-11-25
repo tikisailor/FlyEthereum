@@ -27,7 +27,9 @@ interface ICurvePoolAlEth {
   function exchange(int128 indexCoinToSend, int128 indexCoinToReceive, uint256 assets, uint256 minDy) external payable returns (uint256);
 } 
 
-// interface IWETH9 is IERC20{}
+interface IWETH9 is IERC20{
+    function deposit() external payable;
+}
 
 contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Permit {
     bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
@@ -40,7 +42,7 @@ contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Pe
     address public constant CURVE_ALETH_POOL_CONTRACT = 0xC4C319E2D4d66CcA4464C0c2B32c9Bd23ebe784e;
     uint256 public constant ALCHEMIST_MIN_DY_YIELD_TOKEN = 98;
 
-    IERC20 internal weth9;
+    IWETH9 internal weth9;
     // IERC20 weth9 = IERC20(super.asset());
 
 
@@ -68,8 +70,8 @@ contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Pe
         _grantRole(PAUSER_ROLE, msg.sender);
         _grantRole(MINTER_ROLE, msg.sender);
         _grantRole(MANAGER_ROLE, msg.sender);
-        foldingThreshold = 1000000000000000000;
-        weth9 = IERC20(asset());
+        foldingThreshold = 2000000000000000000;
+        weth9 = IWETH9(asset());
     }
 
     // function _getCurrentAlchemixDept() internal view returns (uint256) {
@@ -85,14 +87,15 @@ contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Pe
     }
 
     // not gas safe
-    function _fold () internal {
-        while (totalAssets() >= foldingThreshold) {
+    function _fold (uint256 _wethBalance) internal {
+        while (_wethBalance >= foldingThreshold) {
             _approveAlchemistV2(totalAssets());
             uint256 alcxShares = _depositAlchemist(totalAssets());
             uint256 maxLoan = _calculateMaxLoan(alcxShares);
             _takeAlEthLoan(maxLoan);
-            _swapAlEth(maxLoan);
-            // _wrapEth(dy);
+            uint256 dy =_swapAlEth(maxLoan);
+            _wrapEth(dy);
+            _wethBalance = dy;
         }
     }
 
@@ -117,7 +120,7 @@ contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Pe
         alchemist.mint(amount, address(this));
     }
 
-    function _swapAlEth(uint256 assets) internal {
+    function _swapAlEth(uint256 assets) internal returns (uint256) {
         ICurvePoolAlEth curvePool = ICurvePoolAlEth(CURVE_ALETH_POOL_CONTRACT);
         address zeroAddress = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE;
         int128 indexEth;
@@ -142,10 +145,11 @@ contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Pe
 
         dy = curvePool.exchange(indexAlEth, indexEth, assets, minDy);
 
-        //wrap(dy)
+        return dy;
     }
 
     function _wrapEth(uint256 assets) internal {
+        weth9.deposit{value: assets}();
     }
 
     function deposit(uint256 assets, address receiver) public override returns (uint256) {
@@ -153,7 +157,7 @@ contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Pe
 
         uint256 shares = super.deposit(assets, receiver);
 
-        _fold();
+        _fold(totalAssets());
 
         return shares;
     }
