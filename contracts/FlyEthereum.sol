@@ -8,11 +8,13 @@ import "@openzeppelin/contracts/security/Pausable.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/draft-ERC20Permit.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.sol";
+import "@openzeppelin/contracts/utils/math/Math.sol";
 
 interface IAlchemistV2Eth {
   function approveMint(address spender, uint256 amount) external;
   function mint(uint256 amount, address receiver) external;
   function depositUnderlying(address _yieldToken, uint256 _amount, address _receipient, uint256 _minimumAmountOut) external returns (uint256 shares);
+  function accounts(address owner) external view returns (int256 debt, address[] memory depositedTokens);
 }
 
 // interface ICurveFactoryV2 {
@@ -29,9 +31,12 @@ interface ICurvePoolAlEth {
 
 interface IWETH9 is IERC20{
     function deposit() external payable;
+    function decimals() external view returns (uint256);
 }
 
 contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Permit {
+    using Math for uint256;
+
     bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
     bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
     bytes32 public constant MANAGER_ROLE = keccak256("MANAGER_ROLE");
@@ -43,25 +48,39 @@ contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Pe
     uint256 public constant ALCHEMIST_MIN_DY_YIELD_TOKEN = 98;
 
     IWETH9 internal weth9;
-    // IERC20 weth9 = IERC20(super.asset());
-
 
     uint256 public foldingThreshold;
 
-    // positive value reflecting total debt held by the protocol
     uint256 public totalDebt;
 
-    // mapping of dept per account
-    // mapping(address => uint256) internal dept;
+    struct Position {
+        uint256 debt;
+        uint256 ledgerIndex;
+        uint256 credit;
+        // bool initialized;
+    }
 
-    // // positive value that decreases over time (negative values indicate credit)
-    // uint256 public currentTotalDebt;
+    mapping(address => Position) internal accounts;
 
-    // // totalDebt - currentTotalDebt
-    // uint256 public availableTotalRewards;
+    struct Entry {
+        uint256 totalDebt;
+        uint256 totalCredit;
+    }
 
-    // // mapping of available rewards per user at the time of entry
-    // mapping(address => uint256) public priorRewards;
+    Entry[] internal ledger;
+
+    event Fold(
+        uint256 assets,
+        uint256 alcxShares,
+        uint256 maxLoan,
+        uint256 dy
+    );
+
+    event ContractDebt(
+        uint256 totalDebt,
+        int256 currentDebt,
+        uint256 currentCredit
+    );
 
     constructor(
         ERC4626 underlying_
@@ -74,29 +93,33 @@ contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Pe
         weth9 = IWETH9(asset());
     }
 
-    // function _getCurrentAlchemixDept() internal view returns (uint256) {
-    //     return 1000000000;
-    // }
-
-    // function _getAvailableRewards() internal view returns (uint256) {
-    //     return totalDebt - _getCurrentAlchemixDept();
-    // }
-
     function maxDeposit(address) public pure override returns (uint256) {
-        return 10000000000000000000;
+        return 100000000000000000000;
     }
 
     // not gas safe
-    function _fold (uint256 _wethBalance) internal {
-        while (_wethBalance >= foldingThreshold) {
-            _approveAlchemistV2(totalAssets());
-            uint256 alcxShares = _depositAlchemist(totalAssets());
+    function _fold (uint256 _assets) internal virtual returns (uint256, uint256) {
+
+        uint256 debt = 0;
+
+        while (_assets >= foldingThreshold) {
+            _approveAlchemistV2(_assets);
+            uint256 alcxShares = _depositAlchemist(_assets);
             uint256 maxLoan = _calculateMaxLoan(alcxShares);
             _takeAlEthLoan(maxLoan);
+            debt += maxLoan;
             uint256 dy =_swapAlEth(maxLoan);
             _wrapEth(dy);
-            _wethBalance = dy;
+            emit Fold(
+                _assets,
+                alcxShares,
+                maxLoan,
+                dy
+            );
+            _assets = dy;
         }
+
+        return (debt, _assets);
     }
 
     function _approveAlchemistV2(uint256 assets) internal {
@@ -125,7 +148,7 @@ contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Pe
         address zeroAddress = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE;
         int128 indexEth;
         int128 indexAlEth;
-        uint256 minDy = ((assets / 100) * 96);
+        uint256 minDy = (assets / 100) * 96;
 
         if (curvePool.coins(0) == zeroAddress) {
             indexEth = 0;
@@ -152,18 +175,84 @@ contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Pe
         weth9.deposit{value: assets}();
     }
 
-    function deposit(uint256 assets, address receiver) public override returns (uint256) {
+    function deposit(uint256 assets, address receiver) public virtual override returns (uint256) {
+        require(receiver == msg.sender, "You can only deposit to yourself");
         require(assets <= maxDeposit(receiver), "Maximum deposit is 10 WETH");
+        require(assets >= foldingThreshold, "Deposit under foldingThreshold");
 
         uint256 shares = super.deposit(assets, receiver);
 
-        _fold(totalAssets());
+        IAlchemistV2Eth alchemist = IAlchemistV2Eth(ALCHEMIST_CONTRACT);
+
+        (int256 actualDebt, ) = alchemist.accounts(address(this));
+
+        uint256 currentCredit = uint256(int256(totalDebt) - actualDebt);
+
+        emit ContractDebt(
+            totalDebt,
+            actualDebt,
+            currentCredit
+        );
+
+        (uint256 debt, uint256 credit) = _fold(assets);
+
+        totalDebt += debt;
+
+        ledger.push(Entry({totalDebt: totalDebt, totalCredit: currentCredit}));
+
+        uint256 ledgerIndex = ledger.length - 1;
+
+        accounts[receiver].debt > 0 ? credit += _updateAccountCredit(receiver, ledgerIndex) : credit;
+
+        accounts[receiver].debt += debt;
+
+        accounts[receiver].credit += credit;
+
+        accounts[receiver].ledgerIndex = ledgerIndex;
 
         return shares;
     }
 
+    function _updateAccountCredit(address owner, uint256 newIndex) internal view returns (uint256) {
+        require(accounts[owner].debt > 0 , "Account not initialized");
+
+        uint256 formerIndex = accounts[owner].ledgerIndex;
+
+        uint256 credit;
+
+        for (uint256 i = formerIndex + 1; i <= newIndex; i++) {
+
+            uint256 debtRecord = ledger[i-1].totalDebt;
+            
+            uint256 share = debtRecord / accounts[owner].debt;
+
+            credit += (ledger[i].totalCredit - ledger[i-1].totalCredit) / share;
+        }
+
+        return credit;
+    }
+
+    function getAccountPosition(address owner) public view returns (uint256 debt, uint256 credit, uint256 ledgerIndex) {
+        return (accounts[owner].debt, accounts[owner].credit, accounts[owner].ledgerIndex);
+    }
+
+    function getLedgerEntry(uint256 index) public view returns (uint256 debt, uint256 credit) {
+        Entry storage entry = ledger[index];
+        return (entry.totalDebt, entry.totalCredit);
+    }
+
     function setFoldingThreshold(uint256 foldingThreshold_) public onlyRole(MANAGER_ROLE) {
         foldingThreshold = foldingThreshold_;
+    }
+
+    function _convertToShares(uint256 assets, Math.Rounding rounding) internal view override returns (uint256 shares) {
+        // uint256 supply = totalSupply();
+        // address underlying = asset();
+        IWETH9 underlying = IWETH9(asset());
+        return assets.mulDiv(10**decimals(), 10**underlying.decimals(), rounding);
+            // (assets == 0 || supply == 0)
+            //     ? assets.mulDiv(10**decimals(), 10**underlying.decimals(), rounding)
+            //     : assets.mulDiv(supply, totalAssets(), rounding);
     }
 
     function decimals() public pure override(ERC20) returns (uint8) {
