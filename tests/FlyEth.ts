@@ -15,12 +15,14 @@ import mockFlyEthereumJson from "../artifacts/contracts/mockFlyEthereum.sol/mock
 import hre, { ethers, waffle } from 'hardhat'
 import { ERC20, FlyEthereum, MockFlyEthereum } from "../typechain";
 import { expect } from "chai";
-import { Contract } from '@ethersproject/contracts';
+import { Contract, ContractReceipt } from '@ethersproject/contracts';
 import { BigNumber } from '@ethersproject/bignumber';
 // import { formatEther } from '@ethersproject/units';
 // import { ContractJSON } from "ethereum-waffle/dist/esm/ContractJSON";
 import { SignerWithAddress } from "@nomiclabs/hardhat-ethers/signers";
 import fs from 'fs';
+import { TransactionReceipt } from "@ethersproject/abstract-provider";
+import { Transaction } from "@ethersproject/transactions";
 
 dotenv.config()
 
@@ -638,122 +640,166 @@ describe("FlyEth integration", function () {
     });
 
     it("tests flyEth credit accounting", async function () {
-      const amount1 = hre.ethers.utils.parseEther('10.0');
-      const amount2 = hre.ethers.utils.parseEther('90.0');
-      const amount3 = hre.ethers.utils.parseEther('100.0');
-      await wrapEth(weth9Contract, amount1, accounts[0]);
-      await wrapEth(weth9Contract, amount2, accounts[1]);
-      await wrapEth(weth9Contract, amount3, accounts[2]);
-
-      // deploy flyEth mock contract
+      // setup
+      let totalDebt = ethers.BigNumber.from('0')
+      let totalCredit = ethers.BigNumber.from('0')
+      const MOCK_YIELD_RATE = ethers.BigNumber.from('10');
+      const deposit1 = hre.ethers.utils.parseEther('10.0');
+      const deposit2 = hre.ethers.utils.parseEther('10.0');
+      const deposit3 = hre.ethers.utils.parseEther('10.0');
+      const deposit4 = hre.ethers.utils.parseEther('20.0');
+      await wrapEth(weth9Contract, deposit1.add(deposit3), accounts[0]);
+      await wrapEth(weth9Contract, deposit2.add(deposit4), accounts[1]);
       const fethFact = new ethers.ContractFactory(
-        mockFlyEthereumJson.abi,
+        mockFlyEthereumJson.abi, // flyEth mock contract
         mockFlyEthereumJson.bytecode,
         accounts[3]
       );
-
       flyEthContract = await fethFact.deploy(weth9Contract.address) as MockFlyEthereum;
       await flyEthContract.deployed();
+      await weth9Contract.connect(accounts[0]).approve(flyEthContract.address, deposit1.add(deposit3));
+      await weth9Contract.connect(accounts[1]).approve(flyEthContract.address, deposit2.add(deposit4));
 
-      // account 0 makes a deposit
-      await weth9Contract.connect(accounts[0]).approve(flyEthContract.address, amount1);
-      const tx0 = await (await flyEthContract.connect(accounts[0]).deposit(amount1, accounts[0].address)).wait();
+      const traceEvents = (tx: ContractReceipt) => {
+        console.log('Events');
+        let debtCount = ethers.BigNumber.from('0')
+        let remainder;
+        for (const evt of tx.events!) {
+          if (evt.event === 'ContractDebt') {
+              console.log(`ContractDebt ${evt.args}`);
+          }
 
-      console.log('Events');
-      for (const evt of tx0.events!) {
-        if (evt.event === 'ContractDebt') {
-            console.log(`ContractDebt ${evt.args}`);
+          if (evt.event === 'Fold') {
+            console.log(`Fold ${evt.args}`);
+            const [assets, alcxShares, maxLoan, dy] = evt.args!;
+            debtCount = debtCount.add(dy);
+            remainder = dy;
+          }
         }
 
-        if (evt.event === 'Fold') {
-          console.log(`Fold ${evt.args}`);
-        }
+        return { debtCount, remainder };
       }
 
-      console.log(`total assets ${await flyEthContract.totalAssets()}`);
-      console.log(`flyEth total supply ${await flyEthContract.totalSupply()}`);
-      console.log(`flyEth bal 0 ${await flyEthContract.balanceOf(accounts[0].address)}`);
-      const AcctPosition0 = await flyEthContract.getAccountPosition(accounts[0].address);
-      console.log(`account position 0 ${AcctPosition0}`);
-      console.log(`ledger entry ${await flyEthContract.getLedgerEntry(AcctPosition0.ledgerIndex)}`);
+      // const makeDeposit = () => {}
 
-      // set debt reduction to 10%
-      await (flyEthContract as MockFlyEthereum).setMock(true, ethers.BigNumber.from('10'));
+      // 0.0 account 0 makes deposit1
+      const tx00 = await (await flyEthContract.connect(accounts[0]).deposit(deposit1, accounts[0].address)).wait();
+      const { debtCount: debt00, remainder: credit00 } = traceEvents(tx00);
+      const position00 = await flyEthContract.getAccountPosition(accounts[0].address);
+      const ledger00 = await flyEthContract.getLedgerEntry(position00.ledgerIndex);
+      totalDebt = totalDebt.add(debt00);
 
-      // account 1 makes a deposit
-      await weth9Contract.connect(accounts[1]).approve(flyEthContract.address, amount1);
+      expect(position00.debt).to.eq(debt00);
+      expect(position00.credit).to.eq(credit00);
+      expect(ledger00.debt).to.eq(totalDebt);
+      expect(ledger00.credit).to.eq(totalCredit).to.eq(ZERO)
 
-      const tx1 = await (await flyEthContract.connect(accounts[1]).deposit(amount1, accounts[1].address)).wait();
-      await provider.send("evm_mine", []);
+      // console.log(`total assets ${await flyEthContract.totalAssets()}`);
+      // console.log(`flyEth total supply ${await flyEthContract.totalSupply()}`);
+      // console.log(`flyEth bal 0 ${await flyEthContract.balanceOf(accounts[0].address)}`);
+      // console.log(`account position 0 ${position00}`);
+      // console.log(`ledger entry ${await flyEthContract.getLedgerEntry(position00.ledgerIndex)}`);
+
+
+      // activate mock - set debt reduction to 10%
+      await (flyEthContract as MockFlyEthereum).setMock(true, MOCK_YIELD_RATE);
+
+      // 1.0 account 1 makes deposit2
+      const tx10 = await (await flyEthContract.connect(accounts[1]).deposit(deposit2, accounts[1].address)).wait();
+      const { debtCount: debt10, remainder: credit10 } = traceEvents(tx10);
+      const position10 = await flyEthContract.getAccountPosition(accounts[1].address);
+      const ledger10 = await flyEthContract.getLedgerEntry(position10.ledgerIndex);
+      totalDebt = totalDebt.add(debt10);
+      totalCredit = ledger00.debt.div(MOCK_YIELD_RATE);
+
+      expect(position10.debt).to.eq(debt10);
+      expect(position10.credit).to.eq(credit10);
+      expect(ledger10.debt).to.eq(totalDebt);
+      expect(ledger10.credit).to.eq(totalCredit);
+
+      // console.log(`total assets ${await flyEthContract.totalAssets()}`);
+      // console.log(`flyEth total supply ${await flyEthContract.totalSupply()}`);
+      // console.log(`flyEth bal 1 ${await flyEthContract.balanceOf(accounts[1].address)}`);
+      // console.log(`account position 1 ${position10}`);
+      // console.log(`ledger entry ${await flyEthContract.getLedgerEntry(position10.ledgerIndex)}`);
+
+
+      // 0.1 account 0 makes a second deposit3
+      const tx01 = await (await flyEthContract.connect(accounts[0]).deposit(deposit3, accounts[0].address)).wait();
+      const { debtCount: debt01, remainder: credit01 } = traceEvents(tx01);
+      const position01 = await flyEthContract.getAccountPosition(accounts[0].address);
+      const ledger01 = await flyEthContract.getLedgerEntry(position01.ledgerIndex);
+      totalDebt = totalDebt.add(debt01);
+      totalCredit = ledger10.debt.div(MOCK_YIELD_RATE);
+
+      const account0Debt = debt00.add(debt01);
+      // validate against known values for this test
+      const accruedCredit1 = hre.ethers.utils.parseEther('0.875'); // 10% yield from after deposit1
+      const accruedCredit2 = hre.ethers.utils.parseEther('0.875').div(ethers.BigNumber.from('2')); // 50% share after deposit2
+      const accruedCredit3 = (hre.ethers.utils.parseEther('0.875').div(ethers.BigNumber.from('3'))).mul(ethers.BigNumber.from('2')); // 66% share after deposit3 (uncredited)
+      const account0Credit = credit00.add(credit01).add(accruedCredit1).add(accruedCredit2); // add to 'folding remainder'
+
+      expect(position01.debt).to.eq(account0Debt);
+      expect(position01.credit).to.eq(account0Credit);
+      expect(ledger01.debt).to.eq(totalDebt);
+      expect(ledger01.credit).to.eq(totalCredit);
+
+      // console.log(`total assets ${await flyEthContract.totalAssets()}`);
+      // console.log(`flyEth total supply ${await flyEthContract.totalSupply()}`);
+      // console.log(`flyEth bal 0 ${await flyEthContract.balanceOf(accounts[0].address)}`);
+      // console.log(`account position 0 ${position01}`);
+      // console.log(`ledger entry ${await flyEthContract.getLedgerEntry(position01.ledgerIndex)}`);
+
+      // 1.1 account 1 makes a second deposit4
+      const tx11 = await (await flyEthContract.connect(accounts[1]).deposit(deposit4, accounts[1].address)).wait();
+      const { debtCount: debt11, remainder: credit11 } = traceEvents(tx11);
+      const position11 = await flyEthContract.getAccountPosition(accounts[1].address);
+      const ledger11 = await flyEthContract.getLedgerEntry(position11.ledgerIndex);
+      totalDebt = totalDebt.add(debt11);
+      totalCredit = ledger01.debt.div(MOCK_YIELD_RATE);
+
+      // console.log(`total assets ${await flyEthContract.totalAssets()}`);
+      // console.log(`flyEth total supply ${await flyEthContract.totalSupply()}`);
+      // console.log(`flyEth bal 1 ${await flyEthContract.balanceOf(accounts[1].address)}`);
+      // console.log(`account position 1 ${position11}`);
+      // console.log(`ledger entry ${await flyEthContract.getLedgerEntry(position11.ledgerIndex)}`);
+
+      const account1Debt = debt10.add(debt11);
+      // validate against known values for this test
+      const accruedCredita = hre.ethers.utils.parseEther('0.875').div(ethers.BigNumber.from('2')); // 50% share after deposit2
+      const accruedCreditb = hre.ethers.utils.parseEther('0.875').div(ethers.BigNumber.from('3')); // 33% share after deposit3
+      const account1Credit = credit10.add(credit11).add(accruedCredita).add(accruedCreditb); // add to 'folding remainder'
+
+      expect(position11.debt).to.eq(account1Debt);
+      expect(position11.credit).to.eq(account1Credit);
+      expect(ledger11.debt).to.eq(totalDebt);
+      expect(ledger11.credit).to.eq(totalCredit);
+
+      const overallAccruedCreditCalculated = accruedCredit1
+        .add(accruedCredit2)
+        .add(accruedCredit3)
+        .add(accruedCredita)
+        .add(accruedCreditb)
+        
+      const overallAccruedCreditFromContract = ledger11.credit;
+
+      expect(
+        overallAccruedCreditCalculated.add(ethers.BigNumber.from('2')) //rounding error
+      ).to.eq(overallAccruedCreditFromContract);
+
+      expect(
+        overallAccruedCreditCalculated
+          .sub(accruedCredit3) // we subtract the uncredited share of account 0
+          .add(credit00)
+          .add(credit01)
+          .add(credit10)
+          .add(credit11)
+      ).to.eq(position11.credit.add(position01.credit));
       
-      console.log('Events');
-      for (const evt of tx1.events!) {
-        if (evt.event === 'ContractDebt') {
-            console.log(`ContractDebt ${evt.args}`);
-        }
-
-        if (evt.event === 'Fold') {
-          console.log(`Fold ${evt.args}`);
-        }
-      }
-
-      console.log(`total assets ${await flyEthContract.totalAssets()}`);
-      console.log(`flyEth total supply ${await flyEthContract.totalSupply()}`);
-      console.log(`flyEth bal 1 ${await flyEthContract.balanceOf(accounts[1].address)}`);
-
-      const AcctPosition1 = await flyEthContract.getAccountPosition(accounts[1].address);
-      console.log(`account position 1 ${AcctPosition1}`);
-      console.log(`ledger entry ${await flyEthContract.getLedgerEntry(AcctPosition1.ledgerIndex)}`);
-
-
-      // account 0 makes a second deposit
-      await wrapEth(weth9Contract, amount1, accounts[0]);
-      await weth9Contract.connect(accounts[0]).approve(flyEthContract.address, amount1);
-      const tx3 = await (await flyEthContract.connect(accounts[0]).deposit(amount1, accounts[0].address)).wait();
-
-      console.log('Events');
-      for (const evt of tx3.events!) {
-        if (evt.event === 'ContractDebt') {
-            console.log(`ContractDebt ${evt.args}`);
-        }
-
-        if (evt.event === 'Fold') {
-          console.log(`Fold ${evt.args}`);
-        }
-      }
-
-      console.log(`total assets ${await flyEthContract.totalAssets()}`);
-      console.log(`flyEth total supply ${await flyEthContract.totalSupply()}`);
-      console.log(`flyEth bal 0 ${await flyEthContract.balanceOf(accounts[0].address)}`);
-      const AcctPosition01 = await flyEthContract.getAccountPosition(accounts[0].address);
-      console.log(`account position 0 ${AcctPosition01}`);
-      console.log(`ledger entry ${await flyEthContract.getLedgerEntry(AcctPosition01.ledgerIndex)}`);
-
-
-      // account 1 makes a second deposit
-      await weth9Contract.connect(accounts[1]).approve(flyEthContract.address, hre.ethers.utils.parseEther('20.0'));
-
-      const tx4 = await (await flyEthContract.connect(accounts[1]).deposit(hre.ethers.utils.parseEther('20.0'), accounts[1].address)).wait();
-      await provider.send("evm_mine", []);
-      
-      console.log('Events');
-      for (const evt of tx4.events!) {
-        if (evt.event === 'ContractDebt') {
-            console.log(`ContractDebt ${evt.args}`);
-        }
-
-        if (evt.event === 'Fold') {
-          console.log(`Fold ${evt.args}`);
-        }
-      }
-
-      console.log(`total assets ${await flyEthContract.totalAssets()}`);
-      console.log(`flyEth total supply ${await flyEthContract.totalSupply()}`);
-      console.log(`flyEth bal 1 ${await flyEthContract.balanceOf(accounts[1].address)}`);
-
-      const AcctPosition11 = await flyEthContract.getAccountPosition(accounts[1].address);
-      console.log(`account position 1 ${AcctPosition11}`);
-      console.log(`ledger entry ${await flyEthContract.getLedgerEntry(AcctPosition11.ledgerIndex)}`);
+      // verify flyEth token balances
+      expect(await flyEthContract.totalAssets()).to.eq(deposit1.add(deposit2).add(deposit3).add(deposit4));
+      expect(await flyEthContract.balanceOf(accounts[0].address)).to.eq(deposit1.add(deposit3));
+      expect(await flyEthContract.balanceOf(accounts[1].address)).to.eq(deposit2.add(deposit4));
 
     });
 
@@ -934,3 +980,22 @@ describe("FlyEth integration", function () {
             // console.log(`alEth bal ${await alEth.balanceOf(flyEthContract.address)}`);
             // console.log(`weth bal ${await weth9Contract.balanceOf(flyEthContract.address)}`);
             // console.log(`eth bal ${await provider.getBalance(flyEthContract.address)}`);
+
+
+
+
+      // const getAccruedCredit = async (
+      //   position : [BigNumber, BigNumber, BigNumber] & { debt: BigNumber; credit: BigNumber; ledgerIndex: BigNumber; }
+      // ) => {
+
+      //   const previosEntry = await flyEthContract.getLedgerEntry(position.ledgerIndex.sub(ethers.BigNumber.from('1')));
+      //   const currentEntry = await flyEthContract.getLedgerEntry(position.ledgerIndex);
+
+      //   const debtRecord = previosEntry.debt;
+
+      //   const share = debtRecord.div(position.debt);
+
+      //   const credit = (currentEntry.credit.sub(previosEntry.credit)).div(share);
+
+      //   return credit;
+      // }
