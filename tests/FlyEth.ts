@@ -567,14 +567,20 @@ describe("FlyEth integration", function () {
 
     it("verifies that transaction is reverted if weth spending limit is not approved", async function () {
       const amount = hre.ethers.utils.parseEther('10.0');
-      expect(await weth9Contract.connect(accounts[0]).allowance(accounts[1].address, flyEthContract.address)).to.eq(hre.ethers.utils.parseEther('0.0'));
-      await expect(flyEthContract.connect(accounts[0]).deposit(amount, accounts[1].address)).to.be.revertedWith('SafeERC20: low-level call failed')
+      expect(await weth9Contract.connect(accounts[0]).allowance(accounts[0].address, flyEthContract.address)).to.eq(ZERO);
+      await expect(flyEthContract.connect(accounts[0]).deposit(amount, accounts[0].address)).to.be.revertedWith('SafeERC20: low-level call failed')
     });
 
-    it("approves flyEthContract to spend accounts[1] WETH9 balance", async function () {
+    it("verifies that transaction is reverted if receiver != msg.sender", async function () {
       const amount = hre.ethers.utils.parseEther('10.0');
       await weth9Contract.connect(accounts[0]).approve(flyEthContract.address, amount);
-      expect(await weth9Contract.connect(accounts[0]).allowance(accounts[1].address, flyEthContract.address)).to.eq(amount)
+      await expect(flyEthContract.connect(accounts[0]).deposit(amount, accounts[1].address)).to.be.revertedWith('You can only deposit to yourself')
+    });
+
+    it("approves flyEthContract to spend accounts[0] WETH9 balance", async function () {
+      const amount = hre.ethers.utils.parseEther('10.0');
+      await weth9Contract.connect(accounts[0]).approve(flyEthContract.address, amount);
+      expect(await weth9Contract.connect(accounts[0]).allowance(accounts[0].address, flyEthContract.address)).to.eq(amount)
     });
 
     it("deposits underlying (Weth) into flyEthContract", async function () {
@@ -594,16 +600,16 @@ describe("FlyEth integration", function () {
       // const totalTxCost = ((tx1.cumulativeGasUsed).mul(tx1.effectiveGasPrice)).add((tx2.cumulativeGasUsed).mul(tx2.effectiveGasPrice)).add((tx3.cumulativeGasUsed).mul(tx3.effectiveGasPrice))
       // console.log(totalTxCost);
 
-      console.log(`shares ${positions.shares}`);
-      console.log(`debt ${(await AlchemistV2.accounts(flyEthContract.address)).debt}`)
-      console.log(`total value ${await AlchemistV2.totalValue(flyEthContract.address)}`);
-      console.log(`total assets ${await flyEthContract.totalAssets()}`);
-      console.log(`flyEth bal ${await flyEthContract.balanceOf(accounts[0].address)}`);
+      // console.log(`shares ${positions.shares}`);
+      // console.log(`debt ${(await AlchemistV2.accounts(flyEthContract.address)).debt}`)
+      // console.log(`total value ${await AlchemistV2.totalValue(flyEthContract.address)}`);
+      // console.log(`total assets ${await flyEthContract.totalAssets()}`);
+      // console.log(`flyEth bal ${await flyEthContract.balanceOf(accounts[0].address)}`);
 
 
       const AcctPosition = await flyEthContract.getAccountPosition(accounts[0].address);
-      console.log(`account position ${AcctPosition}`);
-      console.log(`ledger entry ${await flyEthContract.getLedgerEntry(AcctPosition.ledgerIndex)}`);
+      // console.log(`account position ${AcctPosition}`);
+      // console.log(`ledger entry ${await flyEthContract.getLedgerEntry(AcctPosition.ledgerIndex)}`);
 
       // account 0 has spent it's weth
       expect(await weth9Contract.balanceOf(accounts[0].address)).to.eq(ZERO);
@@ -655,7 +661,7 @@ describe("FlyEth integration", function () {
 
   });
 
-  describe("flyEth credit / debt accounting tests", function () {
+  xdescribe("flyEth credit / debt accounting tests", function () {
 
     this.timeout(2000000); 
 
@@ -674,11 +680,11 @@ describe("FlyEth integration", function () {
       let remainder;
       for (const evt of tx.events!) {
         if (evt.event === 'ContractDebt') {
-            console.log(`ContractDebt ${evt.args}`);
+            // console.log(`ContractDebt ${evt.args}`);
         }
 
         if (evt.event === 'Fold') {
-          console.log(`Fold ${evt.args}`);
+          // console.log(`Fold ${evt.args}`);
           const [assets, alcxShares, maxLoan, dy] = evt.args!;
           debtCount = debtCount.add(dy);
           remainder = dy;
