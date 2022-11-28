@@ -17,12 +17,6 @@ interface IAlchemistV2Eth {
   function accounts(address owner) external view returns (int256 debt, address[] memory depositedTokens);
 }
 
-// interface ICurveFactoryV2 {
-//   function approveMint(address spender, uint256 amount) external;
-//   function mint(uint256 amount, address receiver) external;
-//   function depositUnderlying(address _yieldToken, uint256 _amount, address _receipient, uint256 _minimumAmountOut) external returns (uint256 shares);
-// }
-
 interface ICurvePoolAlEth {
   function coins(uint256 index) external view returns (address);
   function get_dy(int128 indexCoinToSend, int128 indexCoinToReceive, uint256 amount) external view returns (uint256);
@@ -40,12 +34,14 @@ contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Pe
     bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
     bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
     bytes32 public constant MANAGER_ROLE = keccak256("MANAGER_ROLE");
-    // alchemist contract
+
     address public constant ALCHEMIST_CONTRACT = 0x062Bf725dC4cDF947aa79Ca2aaCCD4F385b13b5c;
     address public constant ALCHEMIST_YIELD_TOKEN_CONTRACT = 0xa258C4606Ca8206D8aA700cE2143D7db854D168c;
     address public constant ALCHEMIST_DEBT_TOKEN_CONTRACT= 0x0100546F2cD4C9D97f798fFC9755E47865FF7Ee6;
     address public constant CURVE_ALETH_POOL_CONTRACT = 0xC4C319E2D4d66CcA4464C0c2B32c9Bd23ebe784e;
+
     uint256 public constant ALCHEMIST_MIN_DY_YIELD_TOKEN = 98;
+    uint256 public constant CURVE_MIN_DY_ALETH_TOKEN = 98;
 
     IWETH9 internal weth9;
 
@@ -57,10 +53,7 @@ contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Pe
         uint256 debt;
         uint256 ledgerIndex;
         uint256 credit;
-        // bool initialized;
     }
-
-    mapping(address => Position) internal accounts;
 
     struct Entry {
         uint256 totalDebt;
@@ -68,6 +61,8 @@ contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Pe
     }
 
     Entry[] internal ledger;
+
+    mapping(address => Position) internal accounts;
 
     event Fold(
         uint256 assets,
@@ -99,10 +94,42 @@ contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Pe
 
     // not gas safe
     function _fold (uint256 _assets) internal virtual returns (uint256, uint256) {
-
         uint256 debt = 0;
-
         while (_assets >= foldingThreshold) {
+            _approveAlchemistV2(_assets);
+            uint256 alcxShares = _depositAlchemist(_assets);
+            uint256 maxLoan = _calculateMaxLoan(alcxShares);
+            uint256 curveDy = _getCurveDy(maxLoan);
+            if (curveDy >= foldingThreshold) {
+                _takeAlEthLoan(maxLoan);
+                debt += maxLoan;
+                uint256 dy =_swapAlEth(maxLoan);
+                _wrapEth(dy);
+                emit Fold(
+                    _assets,
+                    alcxShares,
+                    maxLoan,
+                    dy
+                );
+
+                _assets = dy;
+            } else {
+                _assets = 0;
+            }
+            
+            
+        }
+
+        return (debt, _assets);
+    }
+
+    // not gas safe
+    function _unfold (uint256 _assets) internal virtual returns (uint256, uint256) {
+        uint256 debt = accounts[msg.sender].debt;
+        uint256 ledgerIndex = accounts[msg.sender].ledgerIndex;
+        uint256 credit = accounts[msg.sender].credit;
+
+        while (credit < foldingThreshold) {
             _approveAlchemistV2(_assets);
             uint256 alcxShares = _depositAlchemist(_assets);
             uint256 maxLoan = _calculateMaxLoan(alcxShares);
@@ -128,13 +155,15 @@ contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Pe
 
     function _depositAlchemist(uint256 assets) internal returns (uint256) {
         IAlchemistV2Eth alchemist = IAlchemistV2Eth(ALCHEMIST_CONTRACT);
-        uint256 minimumRequested = (assets / 100) * ALCHEMIST_MIN_DY_YIELD_TOKEN;
+        uint256 minimumRequested = assets.mulDiv(ALCHEMIST_MIN_DY_YIELD_TOKEN, 100, Math.Rounding.Down);
+        // uint256 minimumRequested = (assets / 100) * ALCHEMIST_MIN_DY_YIELD_TOKEN;
         uint256 alcxShares = alchemist.depositUnderlying(ALCHEMIST_YIELD_TOKEN_CONTRACT, assets, address(this), minimumRequested);
         return alcxShares;
     }
 
     function _calculateMaxLoan(uint256 alchemixShares) internal pure returns (uint256) {
-        return (alchemixShares / 2) -1;
+        return (alchemixShares / 2);
+        // return (alchemixShares / 2) -1;
     }
 
     function _takeAlEthLoan(uint256 amount) internal {
@@ -143,12 +172,30 @@ contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Pe
         alchemist.mint(amount, address(this));
     }
 
+    function _getCurveDy(uint256 assets) internal view returns (uint256) {
+        ICurvePoolAlEth curvePool = ICurvePoolAlEth(CURVE_ALETH_POOL_CONTRACT);
+        address zeroAddress = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE;
+        int128 indexEth;
+        int128 indexAlEth;
+
+        if (curvePool.coins(0) == zeroAddress) {
+            indexEth = 0;
+            indexAlEth = 1;
+        } else {
+            indexEth = 1;
+            indexAlEth = 0;
+        }
+
+        return curvePool.get_dy(indexAlEth, indexEth, assets);
+    }
+
     function _swapAlEth(uint256 assets) internal returns (uint256) {
         ICurvePoolAlEth curvePool = ICurvePoolAlEth(CURVE_ALETH_POOL_CONTRACT);
         address zeroAddress = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE;
         int128 indexEth;
         int128 indexAlEth;
-        uint256 minDy = (assets / 100) * 96;
+        uint256 minDy = assets.mulDiv(CURVE_MIN_DY_ALETH_TOKEN, 100, Math.Rounding.Down);
+        // uint256 minDy = (assets / 100) * CURVE_MIN_DY_ALETH_TOKEN;
 
         if (curvePool.coins(0) == zeroAddress) {
             indexEth = 0;
@@ -245,14 +292,31 @@ contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Pe
         foldingThreshold = foldingThreshold_;
     }
 
+    function previewDeposit(uint256 assets) public view virtual override returns (uint256) {
+        // uint256 _assets = assets;
+        // uint256 maxSlippage = 0;
+
+        // while (_assets >= foldingThreshold) {
+        //     uint256 alchmix_dy = _assets.mulDiv(ALCHEMIST_MIN_DY_YIELD_TOKEN, 100, Math.Rounding.Down);
+        //     uint256 curve_dy = (ALCHEMIST_MIN_DY_YIELD_TOKEN * CURVE_MIN_DY_ALETH_TOKEN).mulDiv(_assets, 20000, Math.Rounding.Down);
+        //     uint256 alchmix_slp = _assets - alchmix_dy;
+        //     uint256 curve_slp = (_assets / 2) - curve_dy;
+        //     maxSlippage += alchmix_slp + curve_slp;
+        //     _assets = curve_dy;
+        // }
+
+        // return assets - maxSlippage;
+        return _convertToShares(assets, Math.Rounding.Down);
+    }
+
     function _convertToShares(uint256 assets, Math.Rounding rounding) internal view override returns (uint256 shares) {
-        // uint256 supply = totalSupply();
-        // address underlying = asset();
         IWETH9 underlying = IWETH9(asset());
-        return assets.mulDiv(10**decimals(), 10**underlying.decimals(), rounding);
-            // (assets == 0 || supply == 0)
-            //     ? assets.mulDiv(10**decimals(), 10**underlying.decimals(), rounding)
-            //     : assets.mulDiv(supply, totalAssets(), rounding);
+        return assets.mulDiv(10**decimals(), 10**underlying.decimals(), rounding); // 1:1
+    }
+
+    function _convertToAssets(uint256 shares, Math.Rounding rounding) internal view override returns (uint256 assets) {
+        IWETH9 underlying = IWETH9(asset());
+        return shares.mulDiv(10**underlying.decimals(), 10**decimals(), rounding); // 1:1
     }
 
     function decimals() public pure override(ERC20) returns (uint8) {
@@ -267,9 +331,9 @@ contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Pe
         _unpause();
     }
 
-    function mint(address to, uint256 amount) public onlyRole(MINTER_ROLE) {
-        _mint(to, amount);
-    }
+    // function mint(address to, uint256 amount) public onlyRole(MINTER_ROLE) {
+    //     _mint(to, amount);
+    // }
 
     function _beforeTokenTransfer(address from, address to, uint256 amount)
         internal

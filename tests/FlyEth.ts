@@ -563,7 +563,7 @@ describe("FlyEth integration", function () {
 
   });
   
-  xdescribe("interacting with FlyEth Contract", function () {
+  describe("interacting with FlyEth Contract", function () {
 
     it("verifies that transaction is reverted if weth spending limit is not approved", async function () {
       const amount = hre.ethers.utils.parseEther('10.0');
@@ -661,7 +661,7 @@ describe("FlyEth integration", function () {
 
   });
 
-  xdescribe("flyEth credit / debt accounting tests", function () {
+  describe("flyEth credit / debt accounting tests", function () {
 
     this.timeout(2000000); 
 
@@ -675,7 +675,7 @@ describe("FlyEth integration", function () {
     const deposit4 = hre.ethers.utils.parseEther('20.0');
 
     const traceEvents = (tx: ContractReceipt) => {
-      console.log('Events');
+      // console.log('Events');
       let debtCount = ethers.BigNumber.from('0')
       let remainder;
       for (const evt of tx.events!) {
@@ -812,6 +812,13 @@ describe("FlyEth integration", function () {
       expect(await flyEthContract.balanceOf(accounts[0].address)).to.eq(deposit1.add(deposit3));
       expect(await flyEthContract.balanceOf(accounts[1].address)).to.eq(deposit2.add(deposit4));
 
+    });
+  });
+
+  describe("testing", function () {
+
+    it("tttt", async function () {
+      console.log(ethers.utils.formatEther(await flyEthContract.previewDeposit(hre.ethers.utils.parseEther('100.0'))))
     });
   });
 });
