@@ -15,6 +15,8 @@ interface IAlchemistV2Eth {
   function mint(uint256 amount, address receiver) external;
   function depositUnderlying(address _yieldToken, uint256 _amount, address _receipient, uint256 _minimumAmountOut) external returns (uint256 shares);
   function accounts(address owner) external view returns (int256 debt, address[] memory depositedTokens);
+  function positions(address owner, address yielToken) external view returns (uint256 shares, uint256 lastAccruedWeights);
+  function convertSharesToUnderlyingTokens(address yieldToken, uint256 amount) external view returns (uint256);
 }
 
 interface ICurvePoolAlEth {
@@ -49,7 +51,15 @@ contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Pe
 
     uint256 public totalDebt;
 
+    uint256 public exchangeRate = 20 ether;
+
+    uint256 public exchangeDenominator = 10 ether;
+
+
+    uint256 public alchemistUnderlyingSnapshot = 0;
+
     struct Position {
+        // uint256 alchemixShares;
         uint256 debt;
         uint256 ledgerIndex;
         uint256 credit;
@@ -95,9 +105,11 @@ contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Pe
     // not gas safe
     function _fold (uint256 _assets) internal virtual returns (uint256, uint256) {
         uint256 debt = 0;
+        // uint256 alchemixShares = 0;
         while (_assets >= foldingThreshold) {
             _approveAlchemistV2(_assets);
             uint256 alcxShares = _depositAlchemist(_assets);
+            // alchemixShares += alcxShares;
             uint256 maxLoan = _calculateMaxLoan(alcxShares);
             uint256 curveDy = _getCurveDy(maxLoan);
             if (curveDy >= foldingThreshold) {
@@ -116,10 +128,7 @@ contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Pe
             } else {
                 _assets = 0;
             }
-            
-            
         }
-
         return (debt, _assets);
     }
 
@@ -243,6 +252,14 @@ contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Pe
 
         (uint256 debt, uint256 credit) = _fold(assets);
 
+        // update underlying state - used for exchange ratio calculation
+        alchemistUnderlyingSnapshot = alchemist.convertSharesToUnderlyingTokens(ALCHEMIST_YIELD_TOKEN_CONTRACT, shares);
+
+        // update exchange rate
+        exchangeRate = calculateExchangeRate();
+
+
+        // most of this probably not needed anymore
         totalDebt += debt;
 
         ledger.push(Entry({totalDebt: totalDebt, totalCredit: currentCredit}));
@@ -254,6 +271,8 @@ contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Pe
         accounts[receiver].debt += debt;
 
         accounts[receiver].credit += credit;
+
+        // accounts[receiver].alchemixShares += alchemixShares;
 
         accounts[receiver].ledgerIndex = ledgerIndex;
 
@@ -309,9 +328,30 @@ contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Pe
         return _convertToShares(assets, Math.Rounding.Down);
     }
 
+    function calculateExchangeRate() public view returns (uint256) {
+
+        if (alchemistUnderlyingSnapshot == 0) return exchangeRate;
+
+        IAlchemistV2Eth alchemist = IAlchemistV2Eth(ALCHEMIST_CONTRACT);
+
+        (uint256 shares, ) = alchemist.positions(address(this), ALCHEMIST_YIELD_TOKEN_CONTRACT);
+
+        (int256 debt, ) = alchemist.accounts(address(this));
+
+        uint256 underlying = alchemist.convertSharesToUnderlyingTokens(ALCHEMIST_YIELD_TOKEN_CONTRACT, shares);
+
+        return exchangeRate.mulDiv(uint256(int256(underlying) - debt), alchemistUnderlyingSnapshot, Math.Rounding.Down);
+    }
+
     function _convertToShares(uint256 assets, Math.Rounding rounding) internal view override returns (uint256 shares) {
-        IWETH9 underlying = IWETH9(asset());
-        return assets.mulDiv(10**decimals(), 10**underlying.decimals(), rounding); // 1:1
+
+        uint256 ex = calculateExchangeRate();
+
+        // (X(20÷10))×100 = X / 0.020
+        return (Math.ceilDiv(assets, Math.ceilDiv(ex, exchangeDenominator)))*100;
+
+        // IWETH9 underlying = IWETH9(asset());
+        // return assets.mulDiv(10**decimals(), 10**underlying.decimals(), rounding); // 1:1
     }
 
     function _convertToAssets(uint256 shares, Math.Rounding rounding) internal view override returns (uint256 assets) {
