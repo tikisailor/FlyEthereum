@@ -13,10 +13,13 @@ import "@openzeppelin/contracts/utils/math/Math.sol";
 interface IAlchemistV2Eth {
   function approveMint(address spender, uint256 amount) external;
   function mint(uint256 amount, address receiver) external;
-  function depositUnderlying(address _yieldToken, uint256 _amount, address _receipient, uint256 _minimumAmountOut) external returns (uint256 shares);
+  function depositUnderlying(address yieldToken, uint256 amount, address receipient, uint256 minimumAmountOut) external returns (uint256 shares);
+  function withdrawUnderlying(address yieldToken, uint256 shares, address receipient, uint256 minimumAmountOut) external returns (uint256 assets);
   function accounts(address owner) external view returns (int256 debt, address[] memory depositedTokens);
   function positions(address owner, address yielToken) external view returns (uint256 shares, uint256 lastAccruedWeights);
   function convertSharesToUnderlyingTokens(address yieldToken, uint256 amount) external view returns (uint256);
+  function convertUnderlyingTokensToShares(address yieldToken, uint256 amount) external view returns (uint256);
+  function liquidate(address yieldToken, uint256 shares, uint256 minimumAmountOut) external returns (uint256 sharesLiquidated);
 }
 
 interface ICurvePoolAlEth {
@@ -103,17 +106,17 @@ contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Pe
     }
 
     // not gas safe
-    function _fold (uint256 _assets) internal virtual returns (uint256, uint256) {
+    function _fold (uint256 _assets) internal virtual returns (uint256, uint256, uint256) {
         uint256 debt = 0;
-        // uint256 alchemixShares = 0;
+        uint256 alchemixShares = 0;
         while (_assets >= foldingThreshold) {
             _approveAlchemistV2(_assets);
             uint256 alcxShares = _depositAlchemist(_assets);
-            // alchemixShares += alcxShares;
+            alchemixShares += alcxShares;
             uint256 maxLoan = _calculateMaxLoan(alcxShares);
             uint256 curveDy = _getCurveDy(maxLoan);
             if (curveDy >= foldingThreshold) {
-                _takeAlEthLoan(maxLoan);
+                _takeAlchemixLoan(maxLoan);
                 debt += maxLoan;
                 uint256 dy =_swapAlEth(maxLoan);
                 _wrapEth(dy);
@@ -129,33 +132,7 @@ contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Pe
                 _assets = 0;
             }
         }
-        return (debt, _assets);
-    }
-
-    // not gas safe
-    function _unfold (uint256 _assets) internal virtual returns (uint256, uint256) {
-        uint256 debt = accounts[msg.sender].debt;
-        uint256 ledgerIndex = accounts[msg.sender].ledgerIndex;
-        uint256 credit = accounts[msg.sender].credit;
-
-        while (credit < foldingThreshold) {
-            _approveAlchemistV2(_assets);
-            uint256 alcxShares = _depositAlchemist(_assets);
-            uint256 maxLoan = _calculateMaxLoan(alcxShares);
-            _takeAlEthLoan(maxLoan);
-            debt += maxLoan;
-            uint256 dy =_swapAlEth(maxLoan);
-            _wrapEth(dy);
-            emit Fold(
-                _assets,
-                alcxShares,
-                maxLoan,
-                dy
-            );
-            _assets = dy;
-        }
-
-        return (debt, _assets);
+        return (debt, _assets, alchemixShares);
     }
 
     function _approveAlchemistV2(uint256 assets) internal {
@@ -175,10 +152,15 @@ contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Pe
         // return (alchemixShares / 2) -1;
     }
 
-    function _takeAlEthLoan(uint256 amount) internal {
+    function _takeAlchemixLoan(uint256 amount) internal {
         IAlchemistV2Eth alchemist = IAlchemistV2Eth(ALCHEMIST_CONTRACT);
         alchemist.approveMint(address(alchemist), amount);
         alchemist.mint(amount, address(this));
+    }
+
+    function _liquidateAchemixLoan(address yieldToken, uint256 shares, uint256 minimumAmountOut) internal returns (uint256 sharesLiquidated) {
+        IAlchemistV2Eth alchemist = IAlchemistV2Eth(ALCHEMIST_CONTRACT);
+        return alchemist.liquidate(yieldToken, shares, minimumAmountOut);
     }
 
     function _getCurveDy(uint256 assets) internal view returns (uint256) {
@@ -236,7 +218,9 @@ contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Pe
         require(assets <= maxDeposit(receiver), "Maximum deposit is 10 WETH");
         require(assets >= foldingThreshold, "Deposit under foldingThreshold");
 
-        uint256 shares = super.deposit(assets, receiver);
+        // uint256 shares = super.deposit(assets, receiver);
+
+        SafeERC20.safeTransferFrom(weth9, msg.sender, address(this), assets);
 
         IAlchemistV2Eth alchemist = IAlchemistV2Eth(ALCHEMIST_CONTRACT);
 
@@ -250,13 +234,17 @@ contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Pe
             currentCredit
         );
 
-        (uint256 debt, uint256 credit) = _fold(assets);
+        (uint256 debt, uint256 credit, uint256 alchemixShares) = _fold(assets);
+
+        _mint(receiver, alchemixShares);
+
+        emit Deposit(msg.sender, receiver, assets, alchemixShares);
 
         // update underlying state - used for exchange ratio calculation
-        alchemistUnderlyingSnapshot = alchemist.convertSharesToUnderlyingTokens(ALCHEMIST_YIELD_TOKEN_CONTRACT, shares);
+        // alchemistUnderlyingSnapshot = alchemist.convertSharesToUnderlyingTokens(ALCHEMIST_YIELD_TOKEN_CONTRACT, shares);
 
         // update exchange rate
-        exchangeRate = calculateExchangeRate();
+        // exchangeRate = calculateExchangeRate();
 
 
         // most of this probably not needed anymore
@@ -276,7 +264,30 @@ contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Pe
 
         accounts[receiver].ledgerIndex = ledgerIndex;
 
-        return shares;
+        return alchemixShares;
+    }
+
+    function withdraw( uint256 shares, address receiver, address owner) public virtual override returns (uint256 assets) {
+        require(receiver == msg.sender, "You can only withdraw to yourself");
+        require(assets <= maxWithdraw(receiver), "Maximum withdraw exceeded");
+        if (msg.sender != owner) {
+            _spendAllowance(owner, msg.sender, shares);
+        }
+
+        uint256 _shares = shares;
+
+        IAlchemistV2Eth alchemist = IAlchemistV2Eth(ALCHEMIST_CONTRACT);
+        (int256 actualDebt, ) = alchemist.accounts(address(this));
+        if (actualDebt >= 0) {
+            uint256 debtShare = uint256(actualDebt).mulDiv(shares, totalSupply(), Math.Rounding.Up);
+            uint256 payableShares = alchemist.convertUnderlyingTokensToShares(ALCHEMIST_YIELD_TOKEN_CONTRACT, debtShare);
+            uint256 sharesLiquidated = _liquidateAchemixLoan(ALCHEMIST_YIELD_TOKEN_CONTRACT, payableShares, ALCHEMIST_MIN_DY_YIELD_TOKEN);
+            _shares -= sharesLiquidated;
+        } 
+
+        _burn(owner, shares);
+        alchemist.withdrawUnderlying(ALCHEMIST_YIELD_TOKEN_CONTRACT, _shares, receiver, ALCHEMIST_MIN_DY_YIELD_TOKEN);
+        emit Withdraw(msg.sender, receiver, owner, assets, shares);
     }
 
     function _updateAccountCredit(address owner, uint256 newIndex) internal view returns (uint256) {
@@ -312,51 +323,62 @@ contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Pe
     }
 
     function previewDeposit(uint256 assets) public view virtual override returns (uint256) {
-        // uint256 _assets = assets;
+        uint256 _assets = assets;
         // uint256 maxSlippage = 0;
+        uint256 shares = 0;
 
-        // while (_assets >= foldingThreshold) {
-        //     uint256 alchmix_dy = _assets.mulDiv(ALCHEMIST_MIN_DY_YIELD_TOKEN, 100, Math.Rounding.Down);
-        //     uint256 curve_dy = (ALCHEMIST_MIN_DY_YIELD_TOKEN * CURVE_MIN_DY_ALETH_TOKEN).mulDiv(_assets, 20000, Math.Rounding.Down);
-        //     uint256 alchmix_slp = _assets - alchmix_dy;
-        //     uint256 curve_slp = (_assets / 2) - curve_dy;
-        //     maxSlippage += alchmix_slp + curve_slp;
-        //     _assets = curve_dy;
-        // }
+        while (_assets >= foldingThreshold) {
+            uint256 alchemix_dy = _assets.mulDiv(ALCHEMIST_MIN_DY_YIELD_TOKEN, 100, Math.Rounding.Down);
+            shares += alchemix_dy;
+            uint256 curve_dy = (ALCHEMIST_MIN_DY_YIELD_TOKEN * CURVE_MIN_DY_ALETH_TOKEN).mulDiv(_assets, 20000, Math.Rounding.Down);
+            if (curve_dy >= foldingThreshold) {
+                _assets = curve_dy;
+            } else {
+                _assets = 0;
+            }
 
+            // uint256 alchmix_slp = _assets - alchmix_dy;
+            // uint256 curve_slp = (_assets / 2) - curve_dy;
+            // maxSlippage += alchmix_slp + curve_slp;
+        }
+
+        return shares;
         // return assets - maxSlippage;
-        return _convertToShares(assets, Math.Rounding.Down);
+        // return _convertToShares(assets, Math.Rounding.Down);
     }
 
-    function calculateExchangeRate() public view returns (uint256) {
+    function convertToShares(uint256 assets) public view override returns (uint256) {
 
-        if (alchemistUnderlyingSnapshot == 0) return exchangeRate;
+        uint256 _assets = assets;
+        // uint256 maxSlippage = 0;
+        uint256 shares = 0;
 
+        while (_assets >= foldingThreshold) {
+            IAlchemistV2Eth alchemist = IAlchemistV2Eth(ALCHEMIST_CONTRACT);
+            uint256 alchemix_dy = alchemist.convertUnderlyingTokensToShares(ALCHEMIST_YIELD_TOKEN_CONTRACT, _assets);
+            shares += alchemix_dy;
+            uint256 curve_dy = _getCurveDy(_assets);
+            if (curve_dy >= foldingThreshold) {
+                _assets = curve_dy;
+            } else {
+                _assets = 0;
+            }
+        }
+
+        return shares;
+    }
+
+    function convertToAssets(uint256 shares) public view override returns (uint256 assets) {
         IAlchemistV2Eth alchemist = IAlchemistV2Eth(ALCHEMIST_CONTRACT);
-
-        (uint256 shares, ) = alchemist.positions(address(this), ALCHEMIST_YIELD_TOKEN_CONTRACT);
-
-        (int256 debt, ) = alchemist.accounts(address(this));
-
-        uint256 underlying = alchemist.convertSharesToUnderlyingTokens(ALCHEMIST_YIELD_TOKEN_CONTRACT, shares);
-
-        return exchangeRate.mulDiv(uint256(int256(underlying) - debt), alchemistUnderlyingSnapshot, Math.Rounding.Down);
-    }
-
-    function _convertToShares(uint256 assets, Math.Rounding rounding) internal view override returns (uint256 shares) {
-
-        uint256 ex = calculateExchangeRate();
-
-        // (X(20÷10))×100 = X / 0.020
-        return (Math.ceilDiv(assets, Math.ceilDiv(ex, exchangeDenominator)))*100;
-
+        (int256 actualDebt, ) = alchemist.accounts(address(this));
+        if (actualDebt >= 0) {
+            uint256 debtShare = Math.ceilDiv(uint256(actualDebt), shares);
+            shares -= debtShare;
+        } 
+        return alchemist.convertSharesToUnderlyingTokens(ALCHEMIST_YIELD_TOKEN_CONTRACT, shares);
+        
         // IWETH9 underlying = IWETH9(asset());
-        // return assets.mulDiv(10**decimals(), 10**underlying.decimals(), rounding); // 1:1
-    }
-
-    function _convertToAssets(uint256 shares, Math.Rounding rounding) internal view override returns (uint256 assets) {
-        IWETH9 underlying = IWETH9(asset());
-        return shares.mulDiv(10**underlying.decimals(), 10**decimals(), rounding); // 1:1
+        // return shares.mulDiv(10**underlying.decimals(), 10**decimals(), rounding); // 1:1
     }
 
     function decimals() public pure override(ERC20) returns (uint8) {
@@ -387,3 +409,58 @@ contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Pe
         // do nothing
     }
 }
+
+
+    // function calculateExchangeRate() public view returns (uint256) {
+
+    //     if (alchemistUnderlyingSnapshot == 0) return exchangeRate;
+
+    //     IAlchemistV2Eth alchemist = IAlchemistV2Eth(ALCHEMIST_CONTRACT);
+
+    //     (uint256 shares, ) = alchemist.positions(address(this), ALCHEMIST_YIELD_TOKEN_CONTRACT);
+
+    //     (int256 debt, ) = alchemist.accounts(address(this));
+
+    //     uint256 underlying = alchemist.convertSharesToUnderlyingTokens(ALCHEMIST_YIELD_TOKEN_CONTRACT, shares);
+
+    //     return exchangeRate.mulDiv(uint256(int256(underlying) - debt), alchemistUnderlyingSnapshot, Math.Rounding.Down);
+    // }
+
+
+        // function _convertToShares(uint256 assets, Math.Rounding rounding) internal view override returns (uint256 shares) {
+
+    //     // uint256 ex = calculateExchangeRate();
+
+    //     // (X(20÷10))×100 = X / 0.020
+    //     return (Math.ceilDiv(assets, Math.ceilDiv(ex, exchangeDenominator)))*100;
+
+    //     // IWETH9 underlying = IWETH9(asset());
+    //     // return assets.mulDiv(10**decimals(), 10**underlying.decimals(), rounding); // 1:1
+    // }
+
+
+        // not gas safe
+    // function _unfold (uint256 _assets) internal virtual returns (uint256, uint256) {
+    //     uint256 debt = accounts[msg.sender].debt;
+    //     uint256 ledgerIndex = accounts[msg.sender].ledgerIndex;
+    //     uint256 credit = accounts[msg.sender].credit;
+
+    //     while (credit < foldingThreshold) {
+    //         _approveAlchemistV2(_assets);
+    //         uint256 alcxShares = _depositAlchemist(_assets);
+    //         uint256 maxLoan = _calculateMaxLoan(alcxShares);
+    //         _takeAlchemixLoan(maxLoan);
+    //         debt += maxLoan;
+    //         uint256 dy =_swapAlEth(maxLoan);
+    //         _wrapEth(dy);
+    //         emit Fold(
+    //             _assets,
+    //             alcxShares,
+    //             maxLoan,
+    //             dy
+    //         );
+    //         _assets = dy;
+    //     }
+
+    //     return (debt, _assets);
+    // }

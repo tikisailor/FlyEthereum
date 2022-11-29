@@ -26,7 +26,9 @@ contract mockFlyEthereum is FlyEthereum {
 
         // uint256 currentCredit = 10000000;
 
-        uint256 shares = ERC4626.deposit(assets, receiver);
+        // uint256 shares = ERC4626.deposit(assets, receiver);
+
+        SafeERC20.safeTransferFrom(weth9, msg.sender, address(this), assets);
 
         int256 actualDebt;
 
@@ -48,7 +50,11 @@ contract mockFlyEthereum is FlyEthereum {
             currentCredit
         );
 
-        (uint256 debt, uint256 credit) = _fold(assets);
+        (uint256 debt, uint256 credit, uint256 alchemixShares) = _fold(assets);
+
+        _mint(msg.sender, alchemixShares);
+
+        emit Deposit(msg.sender, receiver, assets, alchemixShares);
 
         totalDebt += debt;
 
@@ -64,16 +70,18 @@ contract mockFlyEthereum is FlyEthereum {
 
         accounts[receiver].ledgerIndex = ledgerIndex;
 
-        return shares;
+        return alchemixShares;
     }
 
-    function _fold (uint256 _assets) internal override returns (uint256, uint256) {
+    function _fold (uint256 _assets) internal override returns (uint256, uint256, uint256) {
 
         uint256 debt = 0;
+        uint256 alchemistShares = 0;
 
         while (_assets >= foldingThreshold) {
             // _approveAlchemistV2(_assets);
             uint256 alcxShares = _assets;
+            alchemistShares += alcxShares;
             uint256 maxLoan = _assets / 2;
 
             // uint256 maxLoan = _calculateMaxLoan(_assets);
@@ -91,6 +99,6 @@ contract mockFlyEthereum is FlyEthereum {
             _assets = dy;
         }
 
-        return (debt, _assets);
+        return (debt, _assets, alchemistShares);
     }
 }
