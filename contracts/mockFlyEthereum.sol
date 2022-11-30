@@ -22,58 +22,52 @@ contract mockFlyEthereum is FlyEthereum {
         require(assets <= maxDeposit(receiver), "Maximum deposit is 10 WETH");
         require(assets >= foldingThreshold, "Deposit under foldingThreshold");
 
-        // totalDebt += 1000000000000;
+        SafeERC20.safeTransferFrom(WETH_9, msg.sender, address(this), assets);
 
-        // uint256 currentCredit = 10000000;
+        // int256 actualDebt;
 
-        // uint256 shares = ERC4626.deposit(assets, receiver);
-
-        SafeERC20.safeTransferFrom(weth9, msg.sender, address(this), assets);
-
-        int256 actualDebt;
-
-        if (mockDebt && (totalDebt > 0)) {
-            actualDebt = int256(totalDebt) - ((int256(totalDebt) / 100) * mockDebtReductionPercent);
-        } else {
-            actualDebt = int256(totalDebt);
-        }
+        // if (mockDebt && (totalDebt > 0)) {
+        //     actualDebt = int256(totalDebt) - ((int256(totalDebt) / 100) * mockDebtReductionPercent);
+        // } else {
+        //     actualDebt = int256(totalDebt);
+        // }
 
         // IAlchemistV2Eth alchemist = IAlchemistV2Eth(ALCHEMIST_CONTRACT);
 
         // (int256 currentDebt, ) = alchemist.accounts(address(this));
         
-        uint256 currentCredit = uint256(int256(totalDebt) - actualDebt);
+        // uint256 currentCredit = uint256(int256(totalDebt) - actualDebt);
 
-        emit ContractDebt(
-            totalDebt,
-            actualDebt,
-            currentCredit
-        );
+        // emit ContractDebt(
+        //     totalDebt,
+        //     actualDebt,
+        //     currentCredit
+        // );
 
-        (uint256 debt, uint256 credit, uint256 alchemixShares) = _fold(assets);
+        uint256 alchemixShares = _fold(assets);
 
         _mint(msg.sender, alchemixShares);
 
         emit Deposit(msg.sender, receiver, assets, alchemixShares);
 
-        totalDebt += debt;
+        // totalDebt += debt;
 
-        ledger.push(Entry({totalDebt: totalDebt, totalCredit: currentCredit}));
+        // ledger.push(Entry({totalDebt: totalDebt, totalCredit: currentCredit}));
 
-        uint256 ledgerIndex = ledger.length - 1;
+        // uint256 ledgerIndex = ledger.length - 1;
 
-        accounts[receiver].debt > 0 ? credit += _updateAccountCredit(receiver, ledgerIndex) : credit;
+        // accounts[receiver].debt > 0 ? credit += _updateAccountCredit(receiver, ledgerIndex) : credit;
 
-        accounts[receiver].debt += debt;
+        // accounts[receiver].debt += debt;
 
-        accounts[receiver].credit += credit;
+        // accounts[receiver].credit += credit;
 
-        accounts[receiver].ledgerIndex = ledgerIndex;
+        // accounts[receiver].ledgerIndex = ledgerIndex;
 
         return alchemixShares;
     }
 
-    function _fold (uint256 _assets) internal override returns (uint256, uint256, uint256) {
+    function _fold (uint256 _assets) internal override returns (uint256) {
 
         uint256 debt = 0;
         uint256 alchemistShares = 0;
@@ -99,6 +93,6 @@ contract mockFlyEthereum is FlyEthereum {
             _assets = dy;
         }
 
-        return (debt, _assets, alchemistShares);
+        return alchemistShares;
     }
 }
