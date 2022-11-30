@@ -1,4 +1,3 @@
-
 import hre, { ethers } from 'hardhat'
 import * as flyEthJson from "../artifacts/contracts/FlyEthereum.sol/FlyEthereum.json";
 import dotenv from "dotenv";
