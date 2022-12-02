@@ -74,7 +74,7 @@ contract FlyEthereum is ERC4626, ERC20Burnable, Pausable, AccessControl, ERC20Pe
     }
 
     function maxDeposit(address) public pure override returns (uint256) {
-        return 1000 ether;
+        return 10 ether;
     }
 
     function setFoldingThreshold(uint256 foldingThreshold_) public onlyRole(MANAGER_ROLE) {
