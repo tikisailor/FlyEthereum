@@ -1,7 +1,7 @@
 <h1 align="center">FlyEthereum - Alchemix wrapper for liquidation free leveraged Eth</h1>
 
 <p align="center">
-  <img src=".logo.png" alt="FlyEthereum-logo" width="150px" height="150"/>
+  <img src="./logo.png" alt="FlyEthereum-logo" width="150px" height="150"/>
   <br>
   <br>
 </p>
